@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+langchain
+langchain-community
+langchain-huggingface
+chromadb
+sentence-transformers
+faiss-cpu
+openai
+llama-cpp-python
+coqui-tts
+faster-whisper
+loguru
+twilio
+httpx
+python-multipart

@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# Models & Data
+models/
+embeddings/
+audio_output/
+audio_uploads/
+logs/
+
+# System
+.DS_Store
+*.log
+
+# IDE/editor
+.vscode/
+.idea/
+
+# Executables
+ngrok.exe
+
+# Env files
+.env
+.env.* 
