@@ -146,8 +146,6 @@ async def twilio_result(call_sid: str, request: Request):
         del call_results[call_sid]
         # Play the response and end the call
         response.play(result["audio_url"])
-        goodbye_audio_url = f"{NGROK_URL}/audio/goodbye.mp3"
-        response.play(goodbye_audio_url)
         response.hangup()
 
     elif result and result["status"] == "error":
