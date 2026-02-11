@@ -3,13 +3,14 @@ from fastapi.responses import FileResponse, Response
 import os
 import shutil
 import uuid
+import asyncio
 import httpx
 from twilio.twiml.voice_response import VoiceResponse, Play
 from loguru import logger
 
 from app.stt import transcribe_audio
 from app.agent import get_rag_response, warm_up_ollama
-from app.tts import synthesize_speech
+from app.tts import synthesize_speech_async
 from app.config import AUDIO_UPLOAD_DIR, AUDIO_OUTPUT_DIR, BASE_DIR, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, NGROK_URL
 
 # Configure Loguru logger
@@ -21,10 +22,147 @@ app = FastAPI()
 # Global dict to track if first reply was given for each call
 first_reply_given = {}
 
+# Global dict to store processing results for async pattern
+call_results = {}
+
+
 @app.on_event("startup")
 async def startup_event():
-    """Warm up models on server start to eliminate cold start delays."""
+    """Warm up models and pre-generate intro audio on server start."""
     warm_up_ollama()
+    # Pre-generate intro and goodbye audio with Edge-TTS voice
+    intro_text = "Hi there! Calling from Paradise Holidays, your travel assistant calling to collect feedback. How is your trip going so far?"
+    await synthesize_speech_async(intro_text, "intro.mp3")
+    goodbye_text = "Thank you for your time. Have a great day!"
+    await synthesize_speech_async(goodbye_text, "goodbye.mp3")
+    logger.info("Intro and goodbye audio pre-generated with Edge-TTS voice.")
+
+
+async def process_recording(call_sid: str, recording_url: str):
+    """
+    Background task: downloads recording, transcribes, generates LLM reply, synthesizes audio.
+    Stores the result in call_results[call_sid] when done.
+    """
+    try:
+        logger.info(f"[BG] Starting processing for call {call_sid}")
+
+        # Download the recorded audio from Twilio
+        async with httpx.AsyncClient(auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)) as client:
+            audio_content = await client.get(recording_url)
+            audio_content.raise_for_status()
+
+        # Save the downloaded audio temporarily
+        unique_filename = f"{call_sid}_recorded.wav"
+        recorded_audio_path = os.path.join(AUDIO_UPLOAD_DIR, unique_filename)
+        with open(recorded_audio_path, "wb") as f:
+            f.write(audio_content.content)
+        logger.info(f"[BG] Recorded audio saved to: {recorded_audio_path}")
+
+        # 1. Transcribe audio
+        transcribed_text = transcribe_audio(recorded_audio_path)
+        os.remove(recorded_audio_path)
+        logger.info(f"[BG] Transcribed text for {call_sid}: {transcribed_text}")
+
+        if "Error" in transcribed_text:
+            call_results[call_sid] = {"status": "error", "error": "transcription_failed"}
+            return
+
+        # 2. Generate LLM reply using RAG
+        llm_reply = get_rag_response(transcribed_text)
+        if "Error" in llm_reply:
+            call_results[call_sid] = {"status": "error", "error": "llm_failed"}
+            return
+        logger.info(f"[BG] LLM Reply for {call_sid}: {llm_reply}")
+
+        # 3. Synthesize speech from LLM reply
+        if not first_reply_given.get(call_sid):
+            max_tts_length = 200
+            first_reply_given[call_sid] = True
+        else:
+            max_tts_length = 100
+        short_reply = llm_reply[:max_tts_length]
+        output_audio_filename = f"reply_{call_sid}.mp3"
+        synthesized_audio_path = await synthesize_speech_async(short_reply, output_audio_filename)
+
+        if "Error" in synthesized_audio_path:
+            call_results[call_sid] = {"status": "error", "error": "tts_failed"}
+            return
+
+        logger.info(f"[BG] Audio ready for {call_sid}: {synthesized_audio_path}")
+
+        # Store result
+        audio_url = f"{NGROK_URL}/audio/{output_audio_filename}"
+        call_results[call_sid] = {
+            "status": "done",
+            "audio_url": audio_url,
+            "text": llm_reply
+        }
+
+    except Exception as e:
+        logger.error(f"[BG] Error processing call {call_sid}: {e}")
+        call_results[call_sid] = {"status": "error", "error": str(e)}
+
+
+@app.post("/twilio_voice")
+async def twilio_voice(request: Request):
+    logger.info("Received Twilio voice webhook request.")
+    form_data = await request.form()
+    call_sid = form_data.get("CallSid")
+    recording_url = form_data.get("RecordingUrl")
+
+    response = VoiceResponse()
+
+    if recording_url:
+        logger.info(f"Recording URL received for {call_sid}. Starting background processing.")
+
+        # Kick off processing in the background
+        asyncio.create_task(process_recording(call_sid, recording_url))
+
+        # Respond IMMEDIATELY to Twilio — silent pause then check for results
+        response.pause(length=2)
+        response.redirect(f"{NGROK_URL}/twilio_result/{call_sid}", method="POST")
+    else:
+        logger.info(f"No recording URL for {call_sid}. Starting conversation.")
+        intro_audio_url = f"{NGROK_URL}/audio/intro.mp3"
+        response.play(intro_audio_url)
+        response.record(action="/twilio_voice", maxLength="15", timeout="5", transcribe=True)
+
+    return Response(content=str(response), media_type="application/xml")
+
+
+@app.post("/twilio_result/{call_sid}")
+async def twilio_result(call_sid: str, request: Request):
+    """
+    Polling endpoint — Twilio redirects here to check if processing is done.
+    If done: plays the audio response.
+    If not done: pauses briefly and redirects back (retry loop).
+    """
+    response = VoiceResponse()
+    result = call_results.get(call_sid)
+
+    if result and result["status"] == "done":
+        logger.info(f"Result ready for {call_sid}. Playing audio: {result['audio_url']}")
+        # Clean up
+        del call_results[call_sid]
+        # Play the response and end the call
+        response.play(result["audio_url"])
+        goodbye_audio_url = f"{NGROK_URL}/audio/goodbye.mp3"
+        response.play(goodbye_audio_url)
+        response.hangup()
+
+    elif result and result["status"] == "error":
+        logger.error(f"Processing failed for {call_sid}: {result['error']}")
+        del call_results[call_sid]
+        response.say("I apologize, but I encountered an error processing your feedback.")
+
+    else:
+        # Still processing — wait and check again
+        logger.info(f"Still processing {call_sid}. Waiting...")
+        response.pause(length=2)
+        response.redirect(f"{NGROK_URL}/twilio_result/{call_sid}", method="POST")
+
+    return Response(content=str(response), media_type="application/xml")
+
 
 @app.post("/process_audio/")
 async def process_audio(audio_file: UploadFile = File(...)):
@@ -33,120 +171,36 @@ async def process_audio(audio_file: UploadFile = File(...)):
         logger.error(f"Invalid file format received: {audio_file.filename}")
         raise HTTPException(status_code=400, detail="Invalid file format. Only WAV, MP3, OGG are supported.")
 
-    # Save the uploaded audio file temporarily
     unique_filename = f"{uuid.uuid4()}_{audio_file.filename}"
     audio_path = os.path.join(AUDIO_UPLOAD_DIR, unique_filename)
     with open(audio_path, "wb") as buffer:
         shutil.copyfileobj(audio_file.file, buffer)
     logger.info(f"Audio file saved temporarily to: {audio_path}")
 
-    # 1. Transcribe audio
     transcribed_text = transcribe_audio(audio_path)
     if "Error" in transcribed_text:
         logger.error(f"STT Error for {audio_file.filename}: {transcribed_text}")
         raise HTTPException(status_code=500, detail=f"STT Error: {transcribed_text}")
     logger.info(f"Transcribed text: {transcribed_text}")
 
-    # 2. Generate LLM reply using RAG
-    llm_reply = get_rag_response(transcribed_text) # Changed from generate_reply
+    llm_reply = get_rag_response(transcribed_text)
     if "Error" in llm_reply:
         logger.error(f"RAG Error for \"{transcribed_text}\": {llm_reply}")
         raise HTTPException(status_code=500, detail=f"RAG Error: {llm_reply}")
     logger.info(f"LLM Reply (from RAG): {llm_reply}")
 
-    # 3. Synthesize speech from LLM reply
-    output_audio_filename = f"reply_{uuid.uuid4()}.wav"
-    synthesized_audio_path = synthesize_speech(llm_reply, output_audio_filename)
+    output_audio_filename = f"reply_{uuid.uuid4()}.mp3"
+    synthesized_audio_path = await synthesize_speech_async(llm_reply, output_audio_filename)
     if "Error" in synthesized_audio_path:
         logger.error(f"TTS Error for \"{llm_reply}\": {synthesized_audio_path}")
         raise HTTPException(status_code=500, detail=f"TTS Error: {synthesized_audio_path}")
     logger.info(f"Synthesized audio saved to: {synthesized_audio_path}")
 
-    # Clean up the uploaded audio file
     os.remove(audio_path)
     logger.info(f"Cleaned up temporary audio file: {audio_path}")
 
     return {"transcribed_text": transcribed_text, "llm_reply": llm_reply, "reply_audio_path": synthesized_audio_path}
 
-@app.post("/twilio_voice")
-async def twilio_voice(request: Request):
-    logger.info("Received Twilio voice webhook request.")
-    form_data = await request.form()
-    call_sid = form_data.get("CallSid")
-    recording_url = form_data.get("RecordingUrl") # URL of the recorded speech from Twilio
-
-    response = VoiceResponse()
-
-    if recording_url:
-        logger.info(f"Twilio recording URL received: {recording_url} for CallSid: {call_sid}")
-        # Download the recorded audio from Twilio
-        try:
-            async with httpx.AsyncClient(auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)) as client:
-                audio_content = await client.get(recording_url)
-                audio_content.raise_for_status() # Raise an exception for bad status codes
-
-            # Save the downloaded audio temporarily
-            unique_filename = f"{call_sid}_recorded.wav"
-            recorded_audio_path = os.path.join(AUDIO_UPLOAD_DIR, unique_filename)
-            with open(recorded_audio_path, "wb") as f:
-                f.write(audio_content.content)
-            logger.info(f"Recorded audio saved temporarily to: {recorded_audio_path}")
-
-            # 1. Transcribe audio
-            transcribed_text = transcribe_audio(recorded_audio_path)
-            os.remove(recorded_audio_path) # Clean up recorded audio
-            logger.info(f"Transcribed text from Twilio call {call_sid}: {transcribed_text}")
-
-            if "Error" in transcribed_text:
-                logger.error(f"STT Error for Twilio call {call_sid}: {transcribed_text}")
-                response.say("I apologize, but I encountered an error transcribing your speech.")
-                return Response(content=str(response), media_type="application/xml")
-
-            # 2. Generate LLM reply using RAG
-            llm_reply = get_rag_response(transcribed_text) # Changed from generate_reply
-            if "Error" in llm_reply:
-                logger.error(f"RAG Error for Twilio call {call_sid} (prompt: \"{transcribed_text}\"): {llm_reply}")
-                response.say("I apologize, but I encountered an error generating a reply.")
-                return Response(content=str(response), media_type="application/xml")
-            logger.info(f"LLM Reply (from RAG) for Twilio call {call_sid}: {llm_reply}")
-
-            # 3. Synthesize speech from LLM reply
-            if not first_reply_given.get(call_sid):
-                max_tts_length = 200  # İlk yanıt için 200 karakter
-                first_reply_given[call_sid] = True
-            else:
-                max_tts_length = 100  # Sonraki yanıtlar için 100 karakter
-            short_reply = llm_reply[:max_tts_length]
-            output_audio_filename = f"reply_{call_sid}.wav"
-            synthesized_audio_path = synthesize_speech(short_reply, output_audio_filename)
-
-            if "Error" in synthesized_audio_path:
-                logger.error(f"TTS Error for Twilio call {call_sid} (reply: \"{llm_reply}\"): {synthesized_audio_path}")
-                response.say("I apologize, but I encountered an error synthesizing my response.")
-                return Response(content=str(response), media_type="application/xml")
-            logger.info(f"Synthesized audio for Twilio call {call_sid} saved to: {synthesized_audio_path}")
-
-            # Construct the URL for the synthesized audio
-            # This assumes your FastAPI app is publicly accessible at a base URL
-            # For local testing, you'll need ngrok or similar to expose your localhost
-            audio_url = f"{NGROK_URL}/audio/{output_audio_filename}"
-            logger.info(f"Twilio audio URL for playback: {audio_url}")
-
-            response.play(audio_url)
-            response.say("Do you have any other feedback about your trip?")
-
-        except httpx.RequestError as e:
-            logger.error(f"HTTPX Request Error for Twilio call {call_sid}: {e}")
-            response.say(f"I am sorry, I could not retrieve the audio recording. Error: {e}")
-        except Exception as e:
-            logger.error(f"An unexpected error occurred for Twilio call {call_sid}: {e}")
-            response.say(f"An unexpected error occurred: {e}")
-    else:
-        logger.info(f"No recording URL received for Twilio call {call_sid}. Initiating recording.")
-        response.say("Hi there! This is your travel assistant from Paradise Holidays. I'm calling to check how your recent trip went. How was your experience?")
-        response.record(action="/twilio_voice", maxLength="15", timeout="5", transcribe=True) # Record user's speech
-
-    return Response(content=str(response), media_type="application/xml")
 
 @app.get("/audio/{filename}")
 async def get_audio(filename: str):
@@ -156,10 +210,9 @@ async def get_audio(filename: str):
     file_path = os.path.join(AUDIO_OUTPUT_DIR, filename)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Audio file not found.")
-    return FileResponse(file_path, media_type="audio/wav")
+    return FileResponse(file_path, media_type="audio/mpeg")
+
 
 if __name__ == "__main__":
     import uvicorn
     print(f"FastAPI app created. To run, use: uvicorn app.main:app --reload --port 8000")
-    # For direct execution (e.g., during development/testing):
-    # uvicorn.run(app, host="0.0.0.0", port=8000)

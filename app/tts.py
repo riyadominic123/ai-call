@@ -1,4 +1,5 @@
-from TTS.api import TTS
+import edge_tts
+import asyncio
 import os
 
 # Define the path for saving audio files
@@ -8,36 +9,48 @@ AUDIO_OUTPUT_DIR = "audio_output"
 if not os.path.exists(AUDIO_OUTPUT_DIR):
     os.makedirs(AUDIO_OUTPUT_DIR)
 
-# Load the TTS model
-# You might need to specify a model name, e.g., "tts_models/en/ljspeech/tacotron2-DDC"
-# For simplicity, we'll use a default or a common one if available.
-try:
-    # This will download the model if not already present
-    tts_model = TTS(model_name="tts_models/en/ljspeech/tacotron2-DDC", progress_bar=False, gpu=False)
-except Exception as e:
-    print(f"Error loading TTS model: {e}")
-    tts_model = None
+# Edge-TTS voice - natural sounding English voice
+VOICE = "en-IN-NeerjaExpressiveNeural"
 
-def synthesize_speech(text: str, output_filename: str) -> str:
-    """
-    Synthesizes speech from text and saves it to an audio file.
-    Returns the path to the saved audio file.
-    """
-    if tts_model is None:
-        return "TTS model not loaded. Cannot synthesize speech."
 
+async def synthesize_speech_async(text: str, output_filename: str) -> str:
+    """
+    Synthesizes speech from text using Edge-TTS and saves it as MP3.
+    """
     output_path = os.path.join(AUDIO_OUTPUT_DIR, output_filename)
     try:
-        tts_model.tts_to_file(text=text, file_path=output_path)
+        communicate = edge_tts.Communicate(text, VOICE)
+        await communicate.save(output_path)
         return output_path
     except Exception as e:
         return f"Error synthesizing speech: {e}"
 
+
+def synthesize_speech(text: str, output_filename: str) -> str:
+    """
+    Synchronous wrapper for Edge-TTS synthesis.
+    """
+    # Change extension from .wav to .mp3 since Edge-TTS outputs MP3
+    if output_filename.endswith(".wav"):
+        output_filename = output_filename.replace(".wav", ".mp3")
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If called from within an async context (FastAPI)
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                result = pool.submit(asyncio.run, synthesize_speech_async(text, output_filename)).result()
+            return result
+        else:
+            return loop.run_until_complete(synthesize_speech_async(text, output_filename))
+    except RuntimeError:
+        return asyncio.run(synthesize_speech_async(text, output_filename))
+
+
 if __name__ == "__main__":
-    # Simple test for speech synthesis
     print("TTS module created. Testing synthesize_speech...")
-    test_text = "Hello, this is a test of the text-to-speech module."
-    test_output_file = "test_output.wav"
+    test_text = "Hello, this is a test of the Edge TTS module."
+    test_output_file = "test_output.mp3"
     audio_file_path = synthesize_speech(test_text, test_output_file)
 
     if audio_file_path and "Error" not in audio_file_path:
