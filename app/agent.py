@@ -1,29 +1,13 @@
-from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
-from langchain_community.llms import LlamaCpp
+import httpx
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 import os
 
-from app.config import CHROMA_DB_PATH, PHI2_MODEL_PATH, LLAMA3B_MODEL_PATH
+from app.config import CHROMA_DB_PATH
 
-# Load the LLM model (using LlamaCpp for GGUF)
-# Ensure you have either phi-2.gguf or llama-3b.gguf in the models/ directory
-try:
-    # Choose the model you want to use
-    model_path = PHI2_MODEL_PATH # Or LLAMA3B_MODEL_PATH
-    
-    llm = LlamaCpp(
-        model_path=model_path,
-        n_ctx=1024, # Increased slightly to fit context
-        n_gpu_layers=-1, # Offload all layers to GPU if available
-        n_batch=512, # Process tokens in batches
-        max_tokens=64, # Hard limit on generation length
-        verbose=False, # Suppress verbose output
-    )
-except Exception as e:
-    print(f"Error loading LLM model for RAG: {e}")
-    llm = None
+# Ollama API configuration
+OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_MODEL = "travel-ai-fast:latest"
 
 # Load the embeddings model
 try:
@@ -35,53 +19,94 @@ except Exception as e:
 # Load the Chroma vector store
 try:
     vectorstore = Chroma(persist_directory=CHROMA_DB_PATH, embedding_function=embeddings)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 2}) # Retrieve fewer docs to save tokens
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 2})
 except Exception as e:
     print(f"Error loading Chroma vector store: {e}")
     vectorstore = None
     retriever = None
 
-# Create the RAG chain
-qa_chain = None
-if llm and retriever:
-    prompt_template = """Use the following pieces of context to answer the question at the end. 
-    If you don't know the answer, just say that you don't know, don't try to make up an answer. 
-    Keep the answer extremely concise (under 2 sentences).
+# System prompt for the feedback caller
+SYSTEM_PROMPT = """You are a friendly travel feedback caller from Paradise Holidays. 
+Use the trip details below to personalize your conversation. 
+Keep your response to 1-2 short sentences, suitable for a phone call."""
 
-    Context: {context}
 
-    Question: {question}
-    Answer:"""
-    PROMPT = PromptTemplate(
-        template=prompt_template, input_variables=["context", "question"]
-    )
-    chain_type_kwargs = {"prompt": PROMPT}
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm, 
-        chain_type="stuff", 
-        retriever=retriever, 
-        chain_type_kwargs=chain_type_kwargs
-    )
+def warm_up_ollama():
+    """
+    Sends a dummy request to Ollama to pre-load the model into GPU memory.
+    This eliminates the cold start delay on the first real request.
+    """
+    try:
+        print(f"Warming up Ollama model '{OLLAMA_MODEL}'...")
+        with httpx.Client(timeout=120.0) as client:
+            response = client.post(
+                f"{OLLAMA_BASE_URL}/api/generate",
+                json={
+                    "model": OLLAMA_MODEL,
+                    "prompt": "Hello",
+                    "stream": False,
+                    "options": {
+                        "num_predict": 1,  # Minimal tokens just to load the model
+                    }
+                }
+            )
+            response.raise_for_status()
+        print(f"Ollama model '{OLLAMA_MODEL}' is warm and ready on GPU!")
+    except Exception as e:
+        print(f"Warning: Failed to warm up Ollama model: {e}")
+
 
 def get_rag_response(query: str) -> str:
     """
-    Generates a response using the RAG system based on the knowledge base.
+    Generates a feedback-oriented response using RAG context + Ollama.
     """
-    if qa_chain is None:
+    if retriever is None:
         return "RAG system not initialized. Cannot generate context-aware reply."
+    
     try:
-        result = qa_chain.invoke({"query": query})
-        return result["result"]
+        # Retrieve relevant context from the vector store
+        docs = retriever.invoke(query)
+        context = "\n".join([doc.page_content for doc in docs])
+        
+        # Build the prompt with RAG context
+        prompt = f"""{SYSTEM_PROMPT}
+
+Trip Details: {context}
+
+Customer said: {query}
+Your response:"""
+
+        # Call Ollama API directly (fast, model already warm on GPU)
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(
+                f"{OLLAMA_BASE_URL}/api/generate",
+                json={
+                    "model": OLLAMA_MODEL,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "num_predict": 64,  # Keep response short for phone calls
+                        "temperature": 0.7,
+                    }
+                }
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result.get("response", "").strip()
+
+    except httpx.TimeoutException:
+        return "Error: Ollama request timed out."
     except Exception as e:
         return f"Error generating RAG response: {e}"
 
+
 if __name__ == "__main__":
-    # Simple test for RAG system
-    if qa_chain:
-        print("RAG system loaded successfully. Testing get_rag_response...")
-        test_query = "What is the core technology used for STT?"
+    warm_up_ollama()
+    if retriever:
+        print("RAG system loaded successfully. Testing feedback response...")
+        test_query = "The hotel was really nice but the food could have been better."
         response = get_rag_response(test_query)
-        print(f"Query: {test_query}")
-        print(f"Response: {response}")
+        print(f"Customer: {test_query}")
+        print(f"AI Response: {response}")
     else:
         print("RAG system failed to load. Cannot run test.")

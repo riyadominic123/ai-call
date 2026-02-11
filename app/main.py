@@ -8,7 +8,7 @@ from twilio.twiml.voice_response import VoiceResponse, Play
 from loguru import logger
 
 from app.stt import transcribe_audio
-from app.agent import get_rag_response # Changed from app.llm import generate_reply
+from app.agent import get_rag_response, warm_up_ollama
 from app.tts import synthesize_speech
 from app.config import AUDIO_UPLOAD_DIR, AUDIO_OUTPUT_DIR, BASE_DIR, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, NGROK_URL
 
@@ -20,6 +20,11 @@ app = FastAPI()
 
 # Global dict to track if first reply was given for each call
 first_reply_given = {}
+
+@app.on_event("startup")
+async def startup_event():
+    """Warm up models on server start to eliminate cold start delays."""
+    warm_up_ollama()
 
 @app.post("/process_audio/")
 async def process_audio(audio_file: UploadFile = File(...)):
@@ -127,9 +132,8 @@ async def twilio_voice(request: Request):
             audio_url = f"{NGROK_URL}/audio/{output_audio_filename}"
             logger.info(f"Twilio audio URL for playback: {audio_url}")
 
-            response.say("Here is my response:")
             response.play(audio_url)
-            response.say("Is there anything else I can assist you with?")
+            response.say("Do you have any other feedback about your trip?")
 
         except httpx.RequestError as e:
             logger.error(f"HTTPX Request Error for Twilio call {call_sid}: {e}")
@@ -139,8 +143,8 @@ async def twilio_voice(request: Request):
             response.say(f"An unexpected error occurred: {e}")
     else:
         logger.info(f"No recording URL received for Twilio call {call_sid}. Initiating recording.")
-        response.say("I did not receive any audio. Please try speaking after the tone.")
-        response.record(action="/twilio_voice", maxLength="10", timeout="5", transcribe=True) # Record user's speech
+        response.say("Hi there! This is your travel assistant from Paradise Holidays. I'm calling to check how your recent trip went. How was your experience?")
+        response.record(action="/twilio_voice", maxLength="15", timeout="5", transcribe=True) # Record user's speech
 
     return Response(content=str(response), media_type="application/xml")
 

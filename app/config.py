@@ -9,6 +9,7 @@ CHROMA_DB_PATH = os.path.join(BASE_DIR, "embeddings", "chroma_db")
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 PHI2_MODEL_PATH = os.path.join(MODEL_DIR, "phi-2.Q4_K_M.gguf")
 LLAMA3B_MODEL_PATH = os.path.join(MODEL_DIR, "llama-3b.gguf")
+TRAVEL_AI_MODEL_PATH = os.path.join(MODEL_DIR, "my_model.gguf")
 
 AUDIO_UPLOAD_DIR = os.path.join(BASE_DIR, "audio_uploads")
 AUDIO_OUTPUT_DIR = os.path.join(BASE_DIR, "audio_output")

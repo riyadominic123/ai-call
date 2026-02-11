@@ -7,7 +7,7 @@ import os
 try:
     # Using a smaller model for faster local inference, adjust as needed
     # The model will be downloaded to ~/.cache/huggingface/hub if not present
-    model = WhisperModel("base", device="cpu", compute_type="int8") # Use "cuda" if you have a GPU
+    model = WhisperModel("base", device="cuda", compute_type="float16") # Using GPU for faster inference
 except Exception as e:
     print(f"Error loading Faster Whisper model: {e}")
     model = None

@@ -1,27 +1,30 @@
-# AI Call Agent - Knowledge Base
+# AI Travel Feedback Caller - Knowledge Base
 
-## Project Overview
-This document contains the core information for the AI Voice Agent. The agent is designed to handle voice calls, understand user queries, retrieve relevant information from this knowledge base, and respond in a synthesized voice. It's a modular, locally-run system built for flexibility and privacy.
+## Purpose
+This AI is a travel feedback caller. It calls customers after their trip to collect feedback about their experience. The AI should be friendly, conversational, and ask about the customer's travel experience.
 
-## Core Technologies
-The agent is built using a stack of modern, open-source tools:
-- **Speech-to-Text (STT):** Faster Whisper for high-performance, local transcription.
-- **Language Model (LLM):** Phi-2 or LLaMA 3B, running locally via `llama.cpp` for efficient inference.
-- **Retrieval-Augmented Generation (RAG):** LangChain and FAISS are used to create a vector index of this knowledge base, allowing the LLM to answer questions with specific, up-to-date information.
-- **Text-to-Speech (TTS):** Coqui TTS or Piper for generating natural-sounding speech from the LLM's text response.
-- **Backend:** A FastAPI server provides the API endpoints to connect all components.
-- **VoIP Integration:** Twilio is used to handle the telephone call layer, connecting users to the agent.
+## Trip Details
 
-## Key Features
-- **Voice Interaction:** End-to-end voice communication.
-- **Knowledge Retrieval:** Can answer specific questions based on the content in this file.
-- **Local First:** All core AI models (STT, LLM, TTS) run on local hardware, ensuring data privacy.
-- **Modular Design:** Each component (STT, LLM, etc.) is a separate module, making it easy to swap, upgrade, or debug.
+### Recent Bookings
+- **Booking #TRV-1001**: Customer traveled from Delhi to Goa, 3-night stay at Beach Paradise Resort, Jan 15-18, 2026. Package included flights, hotel, and airport transfers.
+- **Booking #TRV-1002**: Customer traveled from Mumbai to Manali, 5-night adventure package, Jan 20-25, 2026. Included trekking, camping, and local sightseeing.
+- **Booking #TRV-1003**: Customer traveled from Bangalore to Kerala Backwaters, 4-night houseboat experience, Feb 1-5, 2026. Premium package with meals and private houseboat.
+- **Booking #TRV-1004**: Customer traveled from Chennai to Rajasthan Heritage Tour, 7-night cultural tour, Feb 5-12, 2026. Covered Jaipur, Udaipur, and Jodhpur with heritage hotel stays.
+- **Booking #TRV-1005**: Customer traveled from Hyderabad to Andaman Islands, 5-night beach getaway, Feb 8-13, 2026. Included snorkeling, scuba diving, and island hopping.
 
-## How to Interact
-- Speak clearly when the agent is listening.
-- You can ask about the project's features, the technologies it uses, or its overall purpose.
-- Example questions:
-  - "Tell me about the technologies used in this project."
-  - "How does the speech-to-text work?"
-  - "What is the purpose of the RAG system?"
+## Feedback Topics
+- Overall trip satisfaction
+- Hotel/accommodation quality
+- Transportation and transfers
+- Food and dining experience
+- Tour guide and activities
+- Value for money
+- Any issues or complaints
+- Would they recommend the service
+- Interest in future trips
+
+## Company Info
+- **Company Name**: TravelEase India
+- **Support Email**: support@travelease.in
+- **Support Phone**: 1800-123-4567
+- **Website**: www.travelease.in
